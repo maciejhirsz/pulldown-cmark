@@ -22,7 +22,9 @@
 
 use std::borrow::Cow;
 use std::borrow::Cow::Borrowed;
+use std::collections::HashMap;
 
+use linklabel::LinkLabel;
 use parse::{Event, Tag, Options};
 use scanners::*;
 use tree::{NIL, Node, Tree};
@@ -80,13 +82,15 @@ struct FirstPass<'a> {
     text: &'a str,
     tree: Tree<Item>,
     last_line_blank: bool,
+    links: HashMap<LinkLabel<'a>, (Cow<'a, str>, Cow<'a, str>)>,
 }
 
 impl<'a> FirstPass<'a> {
     fn new(text: &str) -> FirstPass {
         let tree = Tree::new();
         let last_line_blank = false;
-        FirstPass { text, tree, last_line_blank }
+        let links = HashMap::new();
+        FirstPass { text, tree, last_line_blank, links }
     }
 
     fn run(mut self) -> Tree<Item> {
