@@ -196,14 +196,14 @@ bitflags! {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct Item {
+struct Item<'a> {
     start: usize,
     end: usize,
-    body: ItemBody,
+    body: ItemBody<'a>,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-enum ItemBody {
+enum ItemBody<'a> {
     Paragraph,
     Text,
     SoftBreak,
@@ -223,22 +223,22 @@ enum ItemBody {
     Emphasis,
     Strong,
     Strikethrough,
-    Code(CowIndex),
+    Code(&'a str),
     Link(LinkIndex),
     Image(LinkIndex),
-    FootnoteReference(CowIndex),
+    FootnoteReference(&'a str),
     TaskListMarker(bool), // true for checked
 
     Rule,
     Heading(u32), // heading level
-    FencedCodeBlock(CowIndex),
+    FencedCodeBlock(&'a str),
     IndentCodeBlock,
     Html,
     BlockQuote,
     List(bool, u8, u64), // is_tight, list character, list start index
     ListItem(usize),     // indent level
-    SynthesizeText(CowIndex),
-    FootnoteDefinition(CowIndex),
+    SynthesizeText(&'a str),
+    FootnoteDefinition(&'a str),
 
     // Tables
     Table(AlignmentIndex),
@@ -250,7 +250,7 @@ enum ItemBody {
     Root,
 }
 
-impl<'a> ItemBody {
+impl<'a> ItemBody<'a> {
     fn is_inline(&self) -> bool {
         match *self {
             ItemBody::MaybeEmphasis(..)
@@ -264,7 +264,7 @@ impl<'a> ItemBody {
     }
 }
 
-impl<'a> Default for ItemBody {
+impl<'a> Default for ItemBody<'a> {
     fn default() -> Self {
         ItemBody::Root
     }
@@ -287,7 +287,7 @@ enum TableParseMode {
 /// are in a linear chain with potential inline markup identified.
 struct FirstPass<'a> {
     text: &'a str,
-    tree: Tree<Item>,
+    tree: Tree<Item<'a>>,
     begin_list_item: bool,
     last_line_blank: bool,
     allocs: Allocations<'a>,
@@ -315,7 +315,7 @@ impl<'a> FirstPass<'a> {
         }
     }
 
-    fn run(mut self) -> (Tree<Item>, Allocations<'a>) {
+    fn run(mut self) -> (Tree<Item<'a>>, Allocations<'a>) {
         let mut ix = 0;
         while ix < self.text.len() {
             ix = self.parse_block(ix);
@@ -676,7 +676,7 @@ impl<'a> FirstPass<'a> {
     /// Parse a line of input, appending text and items to tree.
     ///
     /// Returns: index after line and an item representing the break.
-    fn parse_line(&mut self, start: usize, mode: TableParseMode) -> (usize, Option<Item>) {
+    fn parse_line(&mut self, start: usize, mode: TableParseMode) -> (usize, Option<Item<'a>>) {
         let bytes = &self.text.as_bytes();
         let mut pipes = 0;
         let mut last_pipe_ix = start;
@@ -863,13 +863,13 @@ impl<'a> FirstPass<'a> {
                     (n, Some(value)) => {
                         let value = match value {
                             Entity::Char(c) => self.allocs.arena.alloc_char(c),
-                            Entity::Str(slice) => self.allocs.arena.alloc_str(slice),
+                            Entity::Str(slice) => slice,
                         };
                         self.tree.append_text(begin_text, ix);
                         self.tree.append(Item {
                             start: ix,
                             end: ix + n,
-                            body: ItemBody::SynthesizeText(self.allocs.allocate_cow(value.into())),
+                            body: ItemBody::SynthesizeText(value),
                         });
                         begin_text = ix + n;
                         LoopInstruction::ContinueAndSkip(n - 1)
@@ -1046,7 +1046,7 @@ impl<'a> FirstPass<'a> {
         self.tree.append(Item {
             start: start_ix,
             end: 0, // will get set later
-            body: ItemBody::FencedCodeBlock(self.allocs.allocate_cow(info_string)),
+            body: ItemBody::FencedCodeBlock(info_string),
         });
         self.tree.push();
         loop {
@@ -1080,11 +1080,11 @@ impl<'a> FirstPass<'a> {
 
     fn append_code_text(&mut self, remaining_space: usize, start: usize, end: usize) {
         if remaining_space > 0 {
-            let cow_ix = self.allocs.allocate_cow("   "[..remaining_space].into());
+            let slice = &"   "[..remaining_space];
             self.tree.append(Item {
                 start,
                 end: start,
-                body: ItemBody::SynthesizeText(cow_ix),
+                body: ItemBody::SynthesizeText(slice),
             });
         }
         if self.text.as_bytes()[end - 2] == b'\r' {
@@ -1099,12 +1099,12 @@ impl<'a> FirstPass<'a> {
     /// Appends a line of HTML to the tree.
     fn append_html_line(&mut self, remaining_space: usize, start: usize, end: usize) {
         if remaining_space > 0 {
-            let cow_ix = self.allocs.allocate_cow("   "[..remaining_space].into());
+            let slice = &"   "[..remaining_space];
             self.tree.append(Item {
                 start,
                 end: start,
                 // TODO: maybe this should synthesize to html rather than text?
-                body: ItemBody::SynthesizeText(cow_ix),
+                body: ItemBody::SynthesizeText(slice),
             });
         }
         if self.text.as_bytes()[end - 2] == b'\r' {
@@ -1262,7 +1262,7 @@ impl<'a> FirstPass<'a> {
             start,
             end: 0, // will get set later
             // TODO: check whether the label here is strictly necessary
-            body: ItemBody::FootnoteDefinition(self.allocs.allocate_cow(label)),
+            body: ItemBody::FootnoteDefinition(label),
         });
         self.tree.push();
         Some(i)
@@ -1274,7 +1274,7 @@ impl<'a> FirstPass<'a> {
         let tree = &self.tree;
         let list_nesting = self.list_nesting;
 
-        scan_link_label_rest(&mut self.allocs.arena, &self.text[start..], |bytes: &'a [u8]| {
+        scan_link_label_rest(&mut self.allocs.arena, &self.text[start..], &|bytes: &'a [u8]| {
             let mut line_start = LineStart::new(bytes);
             let _ = scan_containers(tree, &mut line_start);
             let bytes_scanned = line_start.bytes_scanned();
@@ -1448,7 +1448,7 @@ fn count_header_cols(
     }
 }
 
-impl<'a> Tree<Item> {
+impl<'a> Tree<Item<'a>> {
     fn append_text(&mut self, start: usize, end: usize) {
         if end > start {
             if let TreePointer::Valid(ix) = self.cur() {
@@ -1734,10 +1734,10 @@ fn scan_link_label<'text, 'tree>(
         Some(line_start.bytes_scanned())
     };
     let pair = if b'^' == bytes[1] {
-        let (byte_index, label) = scan_link_label_rest(arena, &text[2..], linebreak_handler)?;
+        let (byte_index, label) = scan_link_label_rest(arena, &text[2..], &linebreak_handler)?;
         (byte_index + 2, ReferenceLabel::Footnote(label))
     } else {
-        let (byte_index, label) = scan_link_label_rest(arena, &text[1..], linebreak_handler)?;
+        let (byte_index, label) = scan_link_label_rest(arena, &text[1..], &linebreak_handler)?;
         (byte_index + 1, ReferenceLabel::Link(label))
     };
     Some(pair)
@@ -1945,7 +1945,7 @@ pub(crate) struct HtmlScanGuard {
 /// Markdown event iterator.
 pub struct Parser<'a> {
     text: &'a str,
-    tree: Tree<Item>,
+    tree: Tree<Item<'a>>,
     allocs: Allocations<'a>,
     broken_link_callback: Option<&'a dyn Fn(&str, &str) -> Option<(String, String)>>,
     html_scan_guard: HtmlScanGuard,
@@ -2197,7 +2197,7 @@ impl<'a> Parser<'a> {
                                 self.tree[tos.node].next = node_after_link;
                                 self.tree[tos.node].child = TreePointer::Nil;
                                 self.tree[tos.node].item.body =
-                                    ItemBody::FootnoteReference(self.allocs.allocate_cow(l));
+                                    ItemBody::FootnoteReference(l);
                                 prev = TreePointer::Valid(tos.node);
                                 cur = node_after_link;
                                 self.link_stack.clear();
@@ -2543,7 +2543,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let cow = if buf.len() != 0 {
+        let slice = if buf.len() != 0 {
             buf.into()
         } else {
             self.text[span_start..span_end].into()
@@ -2552,10 +2552,10 @@ impl<'a> Parser<'a> {
             self.tree[open].item.body = ItemBody::Text;
             self.tree[open].item.end = self.tree[open].item.start + 1;
             self.tree[open].next = TreePointer::Valid(close);
-            self.tree[close].item.body = ItemBody::Code(self.allocs.allocate_cow(cow));
+            self.tree[close].item.body = ItemBody::Code(slice);
             self.tree[close].item.start = self.tree[open].item.start + 1;
         } else {
-            self.tree[open].item.body = ItemBody::Code(self.allocs.allocate_cow(cow));
+            self.tree[open].item.body = ItemBody::Code(slice);
             self.tree[open].item.end = self.tree[close].item.end;
             self.tree[open].next = self.tree[close].next;
         }
@@ -2710,7 +2710,7 @@ impl<'a> Iterator for OffsetIter<'a> {
     }
 }
 
-fn item_to_tag<'a>(item: &Item, allocs: &Allocations<'a>) -> Tag<'a> {
+fn item_to_tag<'a>(item: &Item<'a>, allocs: &Allocations<'a>) -> Tag<'a> {
     match item.body {
         ItemBody::Paragraph => Tag::Paragraph,
         ItemBody::Emphasis => Tag::Emphasis,
@@ -2726,7 +2726,7 @@ fn item_to_tag<'a>(item: &Item, allocs: &Allocations<'a>) -> Tag<'a> {
         }
         ItemBody::Heading(level) => Tag::Heading(level),
         ItemBody::FencedCodeBlock(cow_ix) => {
-            Tag::CodeBlock(CodeBlockKind::Fenced(allocs.str(cow_ix)))
+            Tag::CodeBlock(CodeBlockKind::Fenced(cow_ix.into()))
         }
         ItemBody::IndentCodeBlock => Tag::CodeBlock(CodeBlockKind::Indented),
         ItemBody::BlockQuote => Tag::BlockQuote,
@@ -2742,21 +2742,21 @@ fn item_to_tag<'a>(item: &Item, allocs: &Allocations<'a>) -> Tag<'a> {
         ItemBody::TableCell => Tag::TableCell,
         ItemBody::TableRow => Tag::TableRow,
         ItemBody::Table(alignment_ix) => Tag::Table(allocs[alignment_ix].clone()),
-        ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.str(cow_ix)),
+        ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(cow_ix.into()),
         _ => panic!("unexpected item body {:?}", item.body),
     }
 }
 
-fn item_to_event<'a>(item: Item, text: &'a str, allocs: &Allocations<'a>) -> Event<'a> {
+fn item_to_event<'a>(item: Item<'a>, text: &'a str, allocs: &Allocations<'a>) -> Event<'a> {
     let tag = match item.body {
         ItemBody::Text => return Event::Text(text[item.start..item.end].into()),
-        ItemBody::Code(cow_ix) => return Event::Code(allocs.str(cow_ix)),
-        ItemBody::SynthesizeText(cow_ix) => return Event::Text(allocs.str(cow_ix)),
+        ItemBody::Code(cow_ix) => return Event::Code(cow_ix.into()),
+        ItemBody::SynthesizeText(cow_ix) => return Event::Text(cow_ix.into()),
         ItemBody::Html => return Event::Html(text[item.start..item.end].into()),
         ItemBody::SoftBreak => return Event::SoftBreak,
         ItemBody::HardBreak => return Event::HardBreak,
         ItemBody::FootnoteReference(cow_ix) => {
-            return Event::FootnoteReference(allocs.str(cow_ix))
+            return Event::FootnoteReference(cow_ix.into())
         }
         ItemBody::TaskListMarker(checked) => return Event::TaskListMarker(checked),
         ItemBody::Rule => return Event::Rule,
@@ -2775,7 +2775,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &Allocations<'a>) -> Eve
         }
         ItemBody::Heading(level) => Tag::Heading(level),
         ItemBody::FencedCodeBlock(cow_ix) => {
-            Tag::CodeBlock(CodeBlockKind::Fenced(allocs.str(cow_ix)))
+            Tag::CodeBlock(CodeBlockKind::Fenced(cow_ix.into()))
         }
         ItemBody::IndentCodeBlock => Tag::CodeBlock(CodeBlockKind::Indented),
         ItemBody::BlockQuote => Tag::BlockQuote,
@@ -2791,7 +2791,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &Allocations<'a>) -> Eve
         ItemBody::TableCell => Tag::TableCell,
         ItemBody::TableRow => Tag::TableRow,
         ItemBody::Table(alignment_ix) => Tag::Table(allocs[alignment_ix].clone()),
-        ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.str(cow_ix)),
+        ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(cow_ix.into()),
         _ => panic!("unexpected item body {:?}", item.body),
     };
 
