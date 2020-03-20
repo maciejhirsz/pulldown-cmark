@@ -24,6 +24,7 @@ use std::cmp::{max, min};
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Index, Range};
 
+use toolshed::Arena;
 use unicase::UniCase;
 
 use crate::linklabel::{scan_link_label_rest, LinkLabel, ReferenceLabel};
@@ -862,7 +863,7 @@ impl<'a> FirstPass<'a> {
                         self.tree.append(Item {
                             start: ix,
                             end: ix + n,
-                            body: ItemBody::SynthesizeText(self.allocs.allocate_cow(value.to_string().into())),
+                            body: ItemBody::SynthesizeText(self.allocs.allocate_transient_str(value)),
                         });
                         begin_text = ix + n;
                         LoopInstruction::ContinueAndSkip(n - 1)
@@ -1847,12 +1848,31 @@ struct CowIndex(usize);
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct AlignmentIndex(usize);
 
-#[derive(Clone)]
+// #[derive(Clone)]
 struct Allocations<'a> {
     refdefs: HashMap<LinkLabel<'a>, LinkDef<'a>>,
     links: Vec<(LinkType, CowStr<'a>, CowStr<'a>)>,
     cows: Vec<CowStr<'a>>,
     alignments: Vec<Vec<Alignment>>,
+    arena: SelfReferencing<'a, Arena>,
+}
+
+struct SelfReferencing<'a, T> {
+    inner: T,
+    marker: std::marker::PhantomData<&'a T>,
+}
+
+impl<'a, T> SelfReferencing<'a, T> {
+    const fn new(inner: T) -> Self {
+        SelfReferencing {
+            inner,
+            marker: std::marker::PhantomData,
+        }
+    }
+
+    fn get(&self) -> &'a T {
+        unsafe { &*(&self.inner as *const T) }
+    }
 }
 
 impl<'a> Allocations<'a> {
@@ -1862,6 +1882,7 @@ impl<'a> Allocations<'a> {
             links: Vec::with_capacity(128),
             cows: Vec::new(),
             alignments: Vec::new(),
+            arena: SelfReferencing::new(Arena::new())
         }
     }
 
@@ -1869,6 +1890,12 @@ impl<'a> Allocations<'a> {
         let ix = self.cows.len();
         self.cows.push(cow);
         CowIndex(ix)
+    }
+
+    fn allocate_transient_str(&mut self, transient: &str) -> CowIndex {
+        let cow = self.arena.get().alloc_str(transient).into();
+
+        self.allocate_cow(cow)
     }
 
     fn allocate_link(&mut self, ty: LinkType, url: CowStr<'a>, title: CowStr<'a>) -> LinkIndex {
@@ -1921,7 +1948,7 @@ pub(crate) struct HtmlScanGuard {
 }
 
 /// Markdown event iterator.
-#[derive(Clone)]
+// #[derive(Clone)]
 pub struct Parser<'a> {
     text: &'a str,
     tree: Tree<Item>,

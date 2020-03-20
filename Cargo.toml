@@ -27,6 +27,7 @@ beef = "0.4"
 bitflags = "1.2"
 unicase = "2.6"
 memchr = "2.3"
+toolshed = "0.8.1"
 getopts = { version = "0.2", optional = true }
 
 [dev-dependencies]
