@@ -25,6 +25,7 @@ harness = false
 [dependencies]
 beef = "0.4"
 bitflags = "1.2"
+itoa = "0.4.5"
 unicase = "2.6"
 memchr = "2.3"
 getopts = { version = "0.2", optional = true }

@@ -20,7 +20,6 @@
 
 //! Utility functions for HTML escaping
 
-use std::io;
 use std::str::from_utf8;
 
 use crate::html::StrWrite;
@@ -41,7 +40,7 @@ static HEX_CHARS: &[u8] = b"0123456789ABCDEF";
 static AMP_ESCAPE: &str = "&amp;";
 static SLASH_ESCAPE: &str = "&#x27;";
 
-pub(crate) fn escape_href<W>(mut w: W, s: &str) -> io::Result<()>
+pub(crate) fn escape_href<W>(mut w: W, s: &str) -> Result<(), W::Error>
 where
     W: StrWrite,
 {
@@ -93,7 +92,7 @@ static HTML_ESCAPES: [&'static str; 5] = ["", "&quot;", "&amp;", "&lt;", "&gt;"]
 
 /// Writes the given string to the Write sink, replacing special HTML bytes
 /// (<, >, &, ") by escape sequences.
-pub(crate) fn escape_html<W: StrWrite>(w: W, s: &str) -> io::Result<()> {
+pub(crate) fn escape_html<W: StrWrite>(w: W, s: &str) -> Result<(), W::Error> {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
         simd::escape_html(w, s)
@@ -104,7 +103,7 @@ pub(crate) fn escape_html<W: StrWrite>(w: W, s: &str) -> io::Result<()> {
     }
 }
 
-fn escape_html_scalar<W: StrWrite>(mut w: W, s: &str) -> io::Result<()> {
+fn escape_html_scalar<W: StrWrite>(mut w: W, s: &str) -> Result<(), W::Error> {
     let bytes = s.as_bytes();
     let mut mark = 0;
     let mut i = 0;
@@ -133,12 +132,11 @@ fn escape_html_scalar<W: StrWrite>(mut w: W, s: &str) -> io::Result<()> {
 mod simd {
     use crate::html::StrWrite;
     use std::arch::x86_64::*;
-    use std::io;
     use std::mem::size_of;
 
     const VECTOR_SIZE: usize = size_of::<__m128i>();
 
-    pub(crate) fn escape_html<W: StrWrite>(mut w: W, s: &str) -> io::Result<()> {
+    pub(crate) fn escape_html<W: StrWrite>(mut w: W, s: &str) -> Result<(), W::Error> {
         // The SIMD accelerated code uses the PSHUFB instruction, which is part
         // of the SSSE3 instruction set. Further, we can only use this code if
         // the buffer is at least one VECTOR_SIZE in length to prevent reading
@@ -214,13 +212,13 @@ mod simd {
     /// Make sure to only call this when `bytes.len() >= 16`, undefined behaviour may
     /// occur otherwise.
     #[target_feature(enable = "ssse3")]
-    unsafe fn foreach_special_simd<F>(
+    unsafe fn foreach_special_simd<E, F>(
         bytes: &[u8],
         mut offset: usize,
         mut callback: F,
-    ) -> io::Result<()>
+    ) -> Result<(), E>
     where
-        F: FnMut(usize) -> io::Result<()>,
+        F: FnMut(usize) -> Result<(), E>,
     {
         // The strategy here is to walk the byte buffer in chunks of VECTOR_SIZE (16)
         // bytes at a time starting at the given offset. For each chunk, we compute a
@@ -261,7 +259,7 @@ mod simd {
         fn multichunk() {
             let mut vec = Vec::new();
             unsafe {
-                super::foreach_special_simd("&aXaaaa.a'aa9a<>aab&".as_bytes(), 0, |ix| {
+                super::foreach_special_simd::<(), _>("&aXaaaa.a'aa9a<>aab&".as_bytes(), 0, |ix| {
                     Ok(vec.push(ix))
                 })
                 .unwrap();
@@ -277,7 +275,7 @@ mod simd {
                 let vek = vec![b; super::VECTOR_SIZE];
                 let mut match_count = 0;
                 unsafe {
-                    super::foreach_special_simd(&vek, 0, |_| {
+                    super::foreach_special_simd::<(), _>(&vek, 0, |_| {
                         match_count += 1;
                         Ok(())
                     })

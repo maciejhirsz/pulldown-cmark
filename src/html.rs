@@ -22,9 +22,10 @@
 
 use std::collections::HashMap;
 use std::fmt::{Arguments, Write as FmtWrite};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, Write};
 
 use beef::lean::Cow;
+use itoa::Integer;
 
 use crate::escape::{escape_href, escape_html};
 use crate::parse::Event::*;
@@ -41,18 +42,27 @@ enum TableState {
 /// `Write` types.
 struct WriteWrapper<W>(W);
 
+#[derive(Debug)]
+pub enum Infallible {}
+
 /// Trait that allows writing string slices. This is basically an extension
 /// of `std::io::Write` in order to include `String`.
 pub(crate) trait StrWrite {
-    fn write_str(&mut self, s: &str) -> io::Result<()>;
+    type Error;
 
-    fn write_fmt(&mut self, args: Arguments) -> io::Result<()>;
+    fn write_str(&mut self, s: &str) -> Result<(), Self::Error>;
+
+    fn write_fmt(&mut self, args: Arguments) -> Result<(), Self::Error>;
+
+    fn write_int<I: Integer>(&mut self, int: I) -> Result<(), Self::Error>;
 }
 
 impl<W> StrWrite for WriteWrapper<W>
 where
     W: Write,
 {
+    type Error = io::Error;
+
     #[inline]
     fn write_str(&mut self, s: &str) -> io::Result<()> {
         self.0.write_all(s.as_bytes())
@@ -62,19 +72,34 @@ where
     fn write_fmt(&mut self, args: Arguments) -> io::Result<()> {
         self.0.write_fmt(args)
     }
+
+    #[inline]
+    fn write_int<I: Integer>(&mut self, int: I) -> io::Result<()> {
+        itoa::write(&mut self.0, int).map(|_| ())
+    }
 }
 
 impl<'w> StrWrite for String {
+    type Error = Infallible;
+
     #[inline]
-    fn write_str(&mut self, s: &str) -> io::Result<()> {
+    fn write_str(&mut self, s: &str) -> Result<(), Infallible> {
         self.push_str(s);
         Ok(())
     }
 
     #[inline]
-    fn write_fmt(&mut self, args: Arguments) -> io::Result<()> {
-        // FIXME: translate fmt error to io error?
-        FmtWrite::write_fmt(self, args).map_err(|_| ErrorKind::Other.into())
+    fn write_fmt(&mut self, args: Arguments) -> Result<(), Infallible> {
+        // Doesn't happen on strings
+        let _ = FmtWrite::write_fmt(self, args);
+        Ok(())
+    }
+
+    #[inline]
+    fn write_int<I: Integer>(&mut self, int: I) -> Result<(), Infallible> {
+        // Doesn't error on strings
+        let _ = itoa::fmt(self, int);
+        Ok(())
     }
 }
 
@@ -82,14 +107,21 @@ impl<W> StrWrite for &'_ mut W
 where
     W: StrWrite,
 {
+    type Error = W::Error;
+
     #[inline]
-    fn write_str(&mut self, s: &str) -> io::Result<()> {
+    fn write_str(&mut self, s: &str) -> Result<(), W::Error> {
         (**self).write_str(s)
     }
 
     #[inline]
-    fn write_fmt(&mut self, args: Arguments) -> io::Result<()> {
+    fn write_fmt(&mut self, args: Arguments) -> Result<(), W::Error> {
         (**self).write_fmt(args)
+    }
+
+    #[inline]
+    fn write_int<I: Integer>(&mut self, int: I) -> Result<(), W::Error> {
+        (**self).write_int(int)
     }
 }
 
@@ -127,14 +159,14 @@ where
     }
 
     /// Writes a new line.
-    fn write_newline(&mut self) -> io::Result<()> {
+    fn write_newline(&mut self) -> Result<(), W::Error> {
         self.end_newline = true;
         self.writer.write_str("\n")
     }
 
     /// Writes a buffer, and tracks whether or not a newline was written.
     #[inline]
-    fn write(&mut self, s: &str) -> io::Result<()> {
+    fn write(&mut self, s: &str) -> Result<(), W::Error> {
         self.writer.write_str(s)?;
 
         if !s.is_empty() {
@@ -143,7 +175,7 @@ where
         Ok(())
     }
 
-    pub fn run(mut self) -> io::Result<()> {
+    pub fn run(mut self) -> Result<(), W::Error> {
         while let Some(event) = self.iter.next() {
             match event {
                 Start(tag) => {
@@ -183,7 +215,7 @@ where
                     escape_html(&mut self.writer, &name)?;
                     self.write("\">")?;
                     let number = *self.numbers.entry(name).or_insert(len);
-                    write!(&mut self.writer, "{}", number)?;
+                    self.writer.write_int(number)?;
                     self.write("</a></sup>")?;
                 }
                 TaskListMarker(true) => {
@@ -198,7 +230,7 @@ where
     }
 
     /// Writes the start of an HTML tag.
-    fn start_tag(&mut self, tag: Tag<'a>) -> io::Result<()> {
+    fn start_tag(&mut self, tag: Tag<'a>) -> Result<(), W::Error> {
         match tag {
             Tag::Paragraph => {
                 if self.end_newline {
@@ -210,10 +242,12 @@ where
             Tag::Heading(level) => {
                 if self.end_newline {
                     self.end_newline = false;
-                    write!(&mut self.writer, "<h{}>", level)
+                    self.write("<h")?;
                 } else {
-                    write!(&mut self.writer, "\n<h{}>", level)
+                    self.write("\n<h")?;
                 }
+                self.writer.write_int(level)?;
+                self.write(">")
             }
             Tag::Table(alignments) => {
                 self.table_alignments = alignments;
@@ -282,7 +316,7 @@ where
                 } else {
                     self.write("\n<ol start=\"")?;
                 }
-                write!(&mut self.writer, "{}", start)?;
+                self.writer.write_int(start)?;
                 self.write("\">\n")
             }
             Tag::List(None) => {
@@ -341,20 +375,20 @@ where
                 self.write("\"><sup class=\"footnote-definition-label\">")?;
                 let len = self.numbers.len() + 1;
                 let number = *self.numbers.entry(name).or_insert(len);
-                write!(&mut self.writer, "{}", number)?;
+                self.writer.write_int(number)?;
                 self.write("</sup>")
             }
         }
     }
 
-    fn end_tag(&mut self, tag: Tag) -> io::Result<()> {
+    fn end_tag(&mut self, tag: Tag) -> Result<(), W::Error> {
         match tag {
             Tag::Paragraph => {
                 self.write("</p>\n")?;
             }
             Tag::Heading(level) => {
                 self.write("</h")?;
-                write!(&mut self.writer, "{}", level)?;
+                self.writer.write_int(level)?;
                 self.write(">\n")?;
             }
             Tag::Table(_) => {
@@ -414,7 +448,7 @@ where
     }
 
     // run raw text, consuming end tag
-    fn raw_text(&mut self) -> io::Result<()> {
+    fn raw_text(&mut self) -> Result<(), W::Error> {
         let mut nest = 0;
         while let Some(event) = self.iter.next() {
             match event {
@@ -435,7 +469,9 @@ where
                 FootnoteReference(name) => {
                     let len = self.numbers.len() + 1;
                     let number = *self.numbers.entry(name).or_insert(len);
-                    write!(&mut self.writer, "[{}]", number)?;
+                    self.write("[")?;
+                    self.writer.write_int(number)?;
+                    self.write("]")?;
                 }
                 TaskListMarker(true) => self.write("[x]")?,
                 TaskListMarker(false) => self.write("[ ]")?,
